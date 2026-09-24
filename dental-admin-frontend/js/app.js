@@ -1,32 +1,25 @@
-// ---------------- In-memory demo data ----------------
-let patients = [
-  { id: "D-2039", name: "Juan Dela Cruz", contact: "0917 123 4567", lastVisit: "Jan 12, 2026", nextVisit: "May 19, 2026", status: "Active",
-    dental: "Routine cleanings every 6 months. No major procedures on file.", medical: "No known allergies." },
-  { id: "D-1142", name: "Maria Clara", contact: "0918 555 2211", lastVisit: "Feb 20, 2026", nextVisit: "May 19, 2026", status: "At Risk",
-    dental: "Upper left molar extraction scheduled. Missed 2 prior appointments.", medical: "Penicillin allergy \u2014 noted for prescriptions." },
-  { id: "D-9982", name: "Roberto Blanco", contact: "0919 888 3344", lastVisit: "May 5, 2026", nextVisit: "May 20, 2026", status: "New",
-    dental: "First visit on file \u2014 no prior history.", medical: "None recorded yet." },
-  { id: "D-3321", name: "Elena Guerrero", contact: "0920 222 7788", lastVisit: "Dec 15, 2025", nextVisit: "Jun 10, 2026", status: "Active",
-    dental: "Ongoing orthodontic monitoring, no adjustments needed.", medical: "Type 2 diabetes \u2014 managed, monitor healing time." },
-];
+const API_BASE = "http://localhost:3000/api";
 
-let schedule = [
-  { time: "9:00 AM", patientId: "D-2039", reason: "Regular Checkup & Cleaning", status: "ok" },
-  { time: "10:00 AM", patientId: "D-1142", reason: "Tooth Extraction - Upper Left Molar", status: "risk" },
-  { time: "11:00 AM", patientId: null, reason: null, status: "cancelled" },
-  { time: "1:00 PM", patientId: null, reason: null, status: "empty" },
-  { time: "2:00 PM", patientId: null, reason: null, status: "empty" },
-  { time: "3:00 PM", patientId: null, reason: null, status: "empty" },
-  { time: "4:00 PM", patientId: null, reason: null, status: "empty" },
-];
-
+// ---------------- Local caches (mirrors of what the backend has) ----------------
+let patients = [];
+let todaysAppointments = []; // raw appointment records for the selected date
+let allSlots = [];
 let currentPatientType = "existing";
+let pollTimer = null;
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
 
 function showToast(msg) {
   const t = document.getElementById("toast");
   t.textContent = msg;
   t.classList.add("show");
   setTimeout(() => t.classList.remove("show"), 2400);
+}
+
+function showConnIssue() {
+  showToast("Can't reach the clinic backend \u2014 make sure the server is running on localhost:3000.");
 }
 
 // ---------------- Login ----------------
@@ -50,6 +43,7 @@ function logout() {
   document.getElementById("login-screen").style.display = "grid";
   document.getElementById("username").value = "";
   document.getElementById("password").value = "";
+  if (pollTimer) clearInterval(pollTimer);
 }
 
 // ---------------- View switching ----------------
@@ -60,59 +54,103 @@ function switchView(view) {
 }
 
 // ---------------- Init ----------------
-function initApp() {
+async function initApp() {
   const dateLabel = document.getElementById("today-date-label");
   dateLabel.textContent = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
   document.getElementById("appt-date").valueAsDate = new Date();
-  renderSchedule();
+
+  await refreshAll();
+
+  // Patients can book from the separate patient site at any time, so poll
+  // the backend periodically to keep the admin dashboard in sync.
+  pollTimer = setInterval(refreshAll, 5000);
+}
+
+async function refreshAll() {
+  await Promise.all([loadPatients(), loadTodaysSchedule()]);
   renderRecords(patients);
   renderPatientSelect();
+  renderSchedule();
+}
+
+// ---------------- Data loading ----------------
+async function loadPatients() {
+  try {
+    const res = await fetch(`${API_BASE}/patients`);
+    patients = await res.json();
+  } catch (err) {
+    showConnIssue();
+  }
+}
+
+async function loadTodaysSchedule() {
+  try {
+    const [apptRes, slotRes] = await Promise.all([
+      fetch(`${API_BASE}/appointments?date=${todayStr()}`),
+      fetch(`${API_BASE}/slots?date=${todayStr()}`),
+    ]);
+    const apptData = await apptRes.json();
+    const slotData = await slotRes.json();
+    todaysAppointments = apptData.appointments;
+    allSlots = slotData.allSlots;
+  } catch (err) {
+    showConnIssue();
+  }
 }
 
 // ---------------- Schedule rendering ----------------
 function renderSchedule() {
   const list = document.getElementById("schedule-list");
   list.innerHTML = "";
-  schedule.forEach((slot, idx) => {
+
+  allSlots.forEach((time) => {
+    const appt = todaysAppointments.find(a => a.time === time && a.status !== "cancelled");
+    const cancelled = todaysAppointments.find(a => a.time === time && a.status === "cancelled");
     const row = document.createElement("div");
     row.className = "slot-row";
-    if (slot.status === "empty") {
-      row.innerHTML = `
-        <div class="slot-time">${slot.time}</div>
-        <div class="empty-slot">Open slot</div>
-        <div></div>
-        <div class="row-actions"><button onclick="openBookingModal('${slot.time}')">Book</button></div>`;
-    } else if (slot.status === "cancelled") {
-      row.innerHTML = `
-        <div class="slot-time">${slot.time}</div>
-        <div class="empty-slot">Cancelled \u2014 flagged for reassignment</div>
-        <div class="badge cancelled">Cancelled</div>
-        <div class="row-actions"><button onclick="openBookingModal('${slot.time}')">Reassign</button></div>`;
-    } else {
-      const pt = patients.find(p => p.id === slot.patientId);
-      const badge = slot.status === "risk"
+
+    if (appt) {
+      const pt = patients.find(p => p.id === appt.patientId);
+      const badge = appt.riskFlag
         ? `<span class="badge risk">High no-show risk</span>`
-        : `<span class="badge ok">Reminder sent</span>`;
+        : `<span class="badge ok">${appt.source === "patient" ? "Booked online" : "Reminder sent"}</span>`;
       row.innerHTML = `
-        <div class="slot-time">${slot.time}</div>
+        <div class="slot-time">${time}</div>
         <div>
           <div class="slot-patient">${pt ? pt.name : "Unknown"}</div>
-          <div class="slot-reason">${slot.reason}</div>
+          <div class="slot-reason">${appt.reason}</div>
         </div>
         ${badge}
         <div class="row-actions">
-          <button onclick="viewProfile('${slot.patientId}')">View</button>
-          <button onclick="cancelSlot(${idx})">Cancel</button>
+          <button onclick="viewProfile('${appt.patientId}')">View</button>
+          <button onclick="cancelAppointment('${appt.id}')">Cancel</button>
         </div>`;
+    } else if (cancelled) {
+      row.innerHTML = `
+        <div class="slot-time">${time}</div>
+        <div class="empty-slot">Cancelled \u2014 flagged for reassignment</div>
+        <div class="badge cancelled">Cancelled</div>
+        <div class="row-actions"><button onclick="openBookingModal('${time}')">Reassign</button></div>`;
+    } else {
+      row.innerHTML = `
+        <div class="slot-time">${time}</div>
+        <div class="empty-slot">Open slot</div>
+        <div></div>
+        <div class="row-actions"><button onclick="openBookingModal('${time}')">Book</button></div>`;
     }
     list.appendChild(row);
   });
 }
 
-function cancelSlot(idx) {
-  schedule[idx] = { time: schedule[idx].time, patientId: null, reason: null, status: "cancelled" };
-  renderSchedule();
-  showToast("Appointment cancelled \u2014 slot flagged as available for reassignment.");
+async function cancelAppointment(apptId) {
+  try {
+    const res = await fetch(`${API_BASE}/appointments/${apptId}/cancel`, { method: "PATCH" });
+    if (!res.ok) throw new Error("cancel failed");
+    await refreshAll();
+    showToast("Appointment cancelled \u2014 slot flagged as available for reassignment.");
+  } catch (err) {
+    showConnIssue();
+  }
 }
 
 // ---------------- Patient records ----------------
@@ -122,13 +160,12 @@ function renderRecords(list) {
   tbody.innerHTML = "";
   list.forEach(p => {
     const initials = p.name.split(" ").map(w => w[0]).slice(0, 2).join("");
-    const badgeClass = p.status === "At Risk" ? "risk" : (p.status === "New" ? "ok" : "ok");
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><div class="pt-name"><div class="pt-avatar">${initials}</div>${p.name}</div></td>
       <td>${p.lastVisit}</td>
       <td>${p.nextVisit}</td>
-      <td><span class="badge ${badgeClass}">${p.status}</span></td>
+      <td><span class="badge ok">${p.status}</span></td>
       <td><button class="link-btn" onclick="viewProfile('${p.id}')">View record</button></td>`;
     tbody.appendChild(tr);
   });
@@ -152,7 +189,7 @@ function viewProfile(patientId) {
   document.getElementById("profile-modal").classList.add("active");
 }
 
-// ---------------- Booking modal ----------------
+// ---------------- Booking modal (staff-side booking, same backend as the patient site) ----------------
 function renderPatientSelect() {
   const sel = document.getElementById("patient-select");
   sel.innerHTML = patients.map(p => `<option value="${p.id}">${p.name} (${p.id})</option>`).join("");
@@ -178,26 +215,22 @@ function closeModal(id) {
   document.getElementById(id).classList.remove("active");
 }
 
-function confirmBooking() {
+async function confirmBooking() {
   const time = document.getElementById("appt-time").value;
   const reason = document.getElementById("appt-reason").value.trim();
   const errBox = document.getElementById("booking-error");
+  errBox.style.display = "none";
 
-  const existingIdx = schedule.findIndex(s => s.time === time);
-  if (existingIdx !== -1 && schedule[existingIdx].status !== "empty" && schedule[existingIdx].status !== "cancelled") {
-    errBox.textContent = `That slot (${time}) is already booked. Please choose a different time.`;
-    errBox.style.display = "block";
-    return;
-  }
   if (!reason) {
     errBox.textContent = "Please enter a reason for the visit.";
     errBox.style.display = "block";
     return;
   }
 
-  let patientId;
+  const payload = { date: document.getElementById("appt-date").value || todayStr(), time, reason, source: "admin" };
+
   if (currentPatientType === "existing") {
-    patientId = document.getElementById("patient-select").value;
+    payload.patientId = document.getElementById("patient-select").value;
   } else {
     const name = document.getElementById("new-patient-name").value.trim();
     if (!name) {
@@ -205,24 +238,27 @@ function confirmBooking() {
       errBox.style.display = "block";
       return;
     }
-    const newId = "D-" + Math.floor(1000 + Math.random() * 8999);
-    const newPatient = { id: newId, name, contact: "\u2014", lastVisit: "\u2014", nextVisit: "To be scheduled",
-      status: "New", dental: "No prior history \u2014 first visit.", medical: "Not yet recorded." };
-    patients.push(newPatient);
-    patientId = newId;
-    renderPatientSelect();
+    payload.newPatientName = name;
   }
 
-  const newSlot = { time, patientId, reason, status: "ok" };
-  if (existingIdx !== -1) {
-    schedule[existingIdx] = newSlot;
-  } else {
-    schedule.push(newSlot);
-    schedule.sort((a, b) => new Date("1/1/2000 " + a.time) - new Date("1/1/2000 " + b.time));
+  try {
+    const res = await fetch(`${API_BASE}/appointments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      // e.g. 409 — someone (maybe a patient booking online) took the slot first
+      errBox.textContent = data.error || "Could not book that slot.";
+      errBox.style.display = "block";
+      await refreshAll();
+      return;
+    }
+    await refreshAll();
+    closeModal("booking-modal");
+    showToast("Appointment booked and confirmation sent.");
+  } catch (err) {
+    showConnIssue();
   }
-
-  renderSchedule();
-  renderRecords(patients);
-  closeModal("booking-modal");
-  showToast("Appointment booked and confirmation sent.");
 }
