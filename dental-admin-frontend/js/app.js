@@ -22,28 +22,83 @@ function showConnIssue() {
   showToast("Can't reach the clinic backend \u2014 make sure the server is running on localhost:3000.");
 }
 
+function getToken() { return sessionStorage.getItem("adminToken"); }
+function setToken(t) { sessionStorage.setItem("adminToken", t); }
+function clearToken() { sessionStorage.removeItem("adminToken"); sessionStorage.removeItem("staffRole"); sessionStorage.removeItem("staffUser"); }
+function getRole() { return sessionStorage.getItem("staffRole"); } // "secretary" | "dentist"
+function isSecretary() { return getRole() === "secretary"; }
+function isDentist() { return getRole() === "dentist"; }
+
+// What each role sees in the sidebar
+const ROLE_LABELS = {
+  secretary: { title: "Secretary", sub: "Front Desk \u00b7 Admin", initial: "S" },
+  dentist:   { title: "Dr. (Dentist)", sub: "Clinical \u00b7 Dentist", initial: "D" },
+};
+
+// Apply the current role to the UI: sidebar label + which controls exist at all
+function applyRoleToUI() {
+  const cfg = ROLE_LABELS[getRole()] || ROLE_LABELS.secretary;
+  document.getElementById("side-user-name").textContent = cfg.title;
+  document.getElementById("side-user-role").textContent = cfg.sub;
+  document.getElementById("side-avatar").textContent = cfg.initial;
+  // only the secretary books / cancels / reassigns
+  document.getElementById("book-btn").style.display = isSecretary() ? "flex" : "none";
+}
+function authHeaders() {
+  return { "Authorization": "Bearer " + getToken(), "Content-Type": "application/json" };
+}
+
 // ---------------- Login ----------------
-function attemptLogin() {
+async function attemptLogin() {
   const u = document.getElementById("username").value.trim();
   const p = document.getElementById("password").value;
   const err = document.getElementById("login-error");
-  if (u === "secretary" && p === "clinic123") {
-    err.style.display = "none";
+  err.style.display = "none";
+
+  try {
+    const res = await fetch(`${API_BASE}/auth/admin-login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: u, password: p }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      err.textContent = data.error || "Incorrect username or password.";
+      err.style.display = "block";
+      return;
+    }
+    setToken(data.token);
+    sessionStorage.setItem("staffRole", data.staffRole);
+    sessionStorage.setItem("staffUser", data.username);
     document.getElementById("login-screen").style.display = "none";
     document.getElementById("app-screen").style.display = "block";
     initApp();
-  } else {
+  } catch (e) {
+    err.textContent = "Couldn't reach the clinic system. Is the backend running?";
     err.style.display = "block";
   }
 }
 document.getElementById("password").addEventListener("keydown", (e) => { if (e.key === "Enter") attemptLogin(); });
 
-function logout() {
+async function logout() {
+  try {
+    await fetch(`${API_BASE}/auth/logout`, { method: "POST", headers: authHeaders() });
+  } catch (err) { /* clearing local state regardless */ }
+  clearToken();
   document.getElementById("app-screen").style.display = "none";
   document.getElementById("login-screen").style.display = "grid";
   document.getElementById("username").value = "";
   document.getElementById("password").value = "";
   if (pollTimer) clearInterval(pollTimer);
+}
+
+function sessionExpired() {
+  clearToken();
+  if (pollTimer) clearInterval(pollTimer);
+  document.getElementById("app-screen").style.display = "none";
+  document.getElementById("login-screen").style.display = "grid";
+  document.getElementById("login-error").textContent = "Your session expired \u2014 please log in again.";
+  document.getElementById("login-error").style.display = "block";
 }
 
 // ---------------- View switching ----------------
@@ -55,6 +110,7 @@ function switchView(view) {
 
 // ---------------- Init ----------------
 async function initApp() {
+  applyRoleToUI();
   const dateLabel = document.getElementById("today-date-label");
   dateLabel.textContent = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
   document.getElementById("appt-date").valueAsDate = new Date();
@@ -76,7 +132,8 @@ async function refreshAll() {
 // ---------------- Data loading ----------------
 async function loadPatients() {
   try {
-    const res = await fetch(`${API_BASE}/patients`);
+    const res = await fetch(`${API_BASE}/patients`, { headers: authHeaders() });
+    if (res.status === 401) return sessionExpired();
     patients = await res.json();
   } catch (err) {
     showConnIssue();
@@ -86,9 +143,10 @@ async function loadPatients() {
 async function loadTodaysSchedule() {
   try {
     const [apptRes, slotRes] = await Promise.all([
-      fetch(`${API_BASE}/appointments?date=${todayStr()}`),
+      fetch(`${API_BASE}/appointments?date=${todayStr()}`, { headers: authHeaders() }),
       fetch(`${API_BASE}/slots?date=${todayStr()}`),
     ]);
+    if (apptRes.status === 401) return sessionExpired();
     const apptData = await apptRes.json();
     const slotData = await slotRes.json();
     todaysAppointments = apptData.appointments;
@@ -123,20 +181,20 @@ function renderSchedule() {
         ${badge}
         <div class="row-actions">
           <button onclick="viewProfile('${appt.patientId}')">View</button>
-          <button onclick="cancelAppointment('${appt.id}')">Cancel</button>
+          ${isSecretary() ? `<button onclick="cancelAppointment('${appt.id}')">Cancel</button>` : ""}
         </div>`;
     } else if (cancelled) {
       row.innerHTML = `
         <div class="slot-time">${time}</div>
         <div class="empty-slot">Cancelled \u2014 flagged for reassignment</div>
         <div class="badge cancelled">Cancelled</div>
-        <div class="row-actions"><button onclick="openBookingModal('${time}')">Reassign</button></div>`;
+        <div class="row-actions">${isSecretary() ? `<button onclick="openBookingModal('${time}')">Reassign</button>` : ""}</div>`;
     } else {
       row.innerHTML = `
         <div class="slot-time">${time}</div>
         <div class="empty-slot">Open slot</div>
         <div></div>
-        <div class="row-actions"><button onclick="openBookingModal('${time}')">Book</button></div>`;
+        <div class="row-actions">${isSecretary() ? `<button onclick="openBookingModal('${time}')">Book</button>` : ""}</div>`;
     }
     list.appendChild(row);
   });
@@ -144,7 +202,7 @@ function renderSchedule() {
 
 async function cancelAppointment(apptId) {
   try {
-    const res = await fetch(`${API_BASE}/appointments/${apptId}/cancel`, { method: "PATCH" });
+    const res = await fetch(`${API_BASE}/appointments/${apptId}/cancel`, { method: "PATCH", headers: authHeaders() });
     if (!res.ok) throw new Error("cancel failed");
     await refreshAll();
     showToast("Appointment cancelled \u2014 slot flagged as available for reassignment.");
@@ -178,15 +236,65 @@ function handleGlobalSearch() {
   renderRecords(filtered);
 }
 
+let currentProfileId = null;
+
+function renderNotes(patient) {
+  const list = document.getElementById("notes-list");
+  const notes = (patient.notes || []).slice().reverse(); // newest first
+  if (notes.length === 0) {
+    list.innerHTML = `<div class="notes-empty">No treatment notes yet.</div>`;
+    return;
+  }
+  list.innerHTML = notes.map(n => `
+    <div class="note-item">
+      ${n.text.replace(/</g, "&lt;")}
+      <div class="note-meta">${new Date(n.createdAt).toLocaleString()}</div>
+    </div>`).join("");
+}
+
 function viewProfile(patientId) {
   const p = patients.find(x => x.id === patientId);
   if (!p) return;
+  currentProfileId = patientId;
   document.getElementById("profile-name").textContent = p.name + " \u2014 " + p.id;
   document.getElementById("profile-contact").textContent = p.contact;
   document.getElementById("profile-dental").textContent = p.dental;
   document.getElementById("profile-medical").textContent = p.medical;
   document.getElementById("profile-status").textContent = p.status;
+
+  // Treatment notes are clinical data: the section only exists for the dentist role
+  const notesSection = document.getElementById("notes-section");
+  if (isDentist()) {
+    notesSection.style.display = "block";
+    document.getElementById("notes-form").style.display = "block";
+    document.getElementById("new-note-text").value = "";
+    renderNotes(p);
+  } else {
+    notesSection.style.display = "none";
+  }
   document.getElementById("profile-modal").classList.add("active");
+}
+
+async function addTreatmentNote() {
+  const text = document.getElementById("new-note-text").value.trim();
+  if (!text || !currentProfileId) return;
+  try {
+    const res = await fetch(`${API_BASE}/patients/${currentProfileId}/notes`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ text }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast(data.error || "Could not save the note."); return; }
+    // refresh the cached patient with the updated notes, then redraw
+    const idx = patients.findIndex(x => x.id === currentProfileId);
+    if (idx !== -1) patients[idx] = data.patient;
+    document.getElementById("new-note-text").value = "";
+    renderNotes(data.patient);
+    showToast("Treatment note saved.");
+  } catch (err) {
+    showConnIssue();
+  }
 }
 
 // ---------------- Booking modal (staff-side booking, same backend as the patient site) ----------------
@@ -244,7 +352,7 @@ async function confirmBooking() {
   try {
     const res = await fetch(`${API_BASE}/appointments`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify(payload),
     });
     const data = await res.json();
@@ -262,3 +370,17 @@ async function confirmBooking() {
     showConnIssue();
   }
 }
+
+// ---------------- Resume an existing session on page load (e.g. after a refresh) ----------------
+(async function tryResumeAdminSession() {
+  if (!getToken()) return; // stay on the login screen
+  try {
+    const res = await fetch(`${API_BASE}/patients`, { headers: authHeaders() });
+    if (!res.ok) { clearToken(); return; }
+    document.getElementById("login-screen").style.display = "none";
+    document.getElementById("app-screen").style.display = "block";
+    initApp();
+  } catch (err) {
+    // backend not reachable yet — just stay on login, user can retry
+  }
+})();
