@@ -24,12 +24,38 @@ function showConnIssue() {
   showToast("Can't reach the clinic backend \u2014 make sure the server is running on localhost:3000.");
 }
 
+// ---------------- Roles (RBAC) ----------------
+// Prototype-only: accounts and permissions live in the browser. See README for
+// what's needed to enforce this server-side.
+const ACCOUNTS = {
+  secretary: { password: "clinic123", role: "secretary", displayName: "Secretary", roleLabel: "Front Desk", initials: "SC" },
+  doctor:    { password: "doctor123", role: "doctor",    displayName: "Doctor",    roleLabel: "Dentist",    initials: "DR" },
+};
+const PERMISSIONS = {
+  secretary: { manageAppointments: true },
+  doctor:    { manageAppointments: false }, // view-only for scheduling
+};
+let currentUser = null;
+function can(permission) {
+  return !!(currentUser && PERMISSIONS[currentUser.role][permission]);
+}
+
+function applyRole() {
+  document.getElementById("side-avatar").textContent = currentUser.initials;
+  document.getElementById("side-user-name").textContent = currentUser.displayName;
+  document.getElementById("side-user-role").textContent = currentUser.roleLabel;
+  document.getElementById("new-appt-btn").style.display = can("manageAppointments") ? "" : "none";
+}
+
 // ---------------- Login ----------------
 function attemptLogin() {
-  const u = document.getElementById("username").value.trim();
+  const u = document.getElementById("username").value.trim().toLowerCase();
   const p = document.getElementById("password").value;
   const err = document.getElementById("login-error");
-  if (u === "secretary" && p === "clinic123") {
+  const account = ACCOUNTS[u];
+  if (account && account.password === p) {
+    currentUser = account;
+    applyRole();
     err.style.display = "none";
     document.getElementById("login-screen").style.display = "none";
     document.getElementById("app-screen").style.display = "block";
@@ -46,6 +72,7 @@ function logout() {
   document.getElementById("username").value = "";
   document.getElementById("password").value = "";
   if (pollTimer) clearInterval(pollTimer);
+  currentUser = null;
 }
 
 // ---------------- View switching ----------------
@@ -125,26 +152,27 @@ function renderSchedule() {
         ${badge}
         <div class="row-actions">
           <button onclick="viewProfile('${appt.patientId}')">View</button>
-          <button onclick="cancelAppointment('${appt.id}')">Cancel</button>
+          ${can("manageAppointments") ? `<button onclick="cancelAppointment('${appt.id}')">Cancel</button>` : ""}
         </div>`;
     } else if (cancelled) {
       row.innerHTML = `
         <div class="slot-time">${time}</div>
         <div class="empty-slot">Cancelled \u2014 flagged for reassignment</div>
         <div class="badge cancelled">Cancelled</div>
-        <div class="row-actions"><button onclick="openBookingModal('${time}')">Reassign</button></div>`;
+        <div class="row-actions">${can("manageAppointments") ? `<button onclick="openBookingModal('${time}')">Reassign</button>` : ""}</div>`;
     } else {
       row.innerHTML = `
         <div class="slot-time">${time}</div>
         <div class="empty-slot">Open slot</div>
         <div></div>
-        <div class="row-actions"><button onclick="openBookingModal('${time}')">Book</button></div>`;
+        <div class="row-actions">${can("manageAppointments") ? `<button onclick="openBookingModal('${time}')">Book</button>` : ""}</div>`;
     }
     list.appendChild(row);
   });
 }
 
 async function cancelAppointment(apptId) {
+  if (!can("manageAppointments")) return showToast("Your role can't change appointments.");
   try {
     const res = await fetch(`${API_BASE}/appointments/${apptId}/cancel`, { method: "PATCH" });
     if (!res.ok) throw new Error("cancel failed");
@@ -206,6 +234,7 @@ function setPatientType(type) {
 }
 
 function openBookingModal(prefTime) {
+  if (!can("manageAppointments")) return showToast("Your role can't set appointments.");
   document.getElementById("booking-error").style.display = "none";
   document.getElementById("appt-reason").value = "";
   document.getElementById("new-patient-name").value = "";
@@ -218,6 +247,7 @@ function closeModal(id) {
 }
 
 async function confirmBooking() {
+  if (!can("manageAppointments")) return showToast("Your role can't set appointments.");
   const time = document.getElementById("appt-time").value;
   const reason = document.getElementById("appt-reason").value.trim();
   const errBox = document.getElementById("booking-error");
