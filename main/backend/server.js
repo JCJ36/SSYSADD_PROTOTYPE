@@ -8,12 +8,8 @@ const bcrypt = require("bcryptjs");
 const DB_PATH = path.join(__dirname, "db.json");
 // Railway assigns its own port at runtime via process.env.PORT — a hardcoded
 // port will fail to bind on their infrastructure, so always fall back to it.
-// const PORT = process.env.PORT || 3000;
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Dental clinic backend running on port ${PORT}`);
-});
+
 
 // Comma-separated list of allowed origins, e.g. "https://admin.example.com,https://patients.example.com"
 // Left unset (default) = allow any origin, which is fine for this prototype since
